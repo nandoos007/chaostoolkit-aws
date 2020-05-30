@@ -13,6 +13,7 @@ from chaoslib.types import Configuration, Secrets
 from logzero import logger
 import boto3
 import json
+import boto
 
 
 __all__ = ["stop_instance", "stop_instances", "terminate_instances",
