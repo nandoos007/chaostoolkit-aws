@@ -5,8 +5,69 @@ from chaosaws import aws_client
 from chaosaws.types import AWSResponse
 from chaoslib.types import Configuration, Secrets
 from chaoslib.exceptions import FailedActivity
+from logzero import logger
+import boto3
+import paramiko
+import pickle
+import json
+import os
 
-__all__ = ["describe_instances", "count_instances", "instance_state"]
+
+
+__all__ = ["describe_instances", "count_instances", "instance_state", "ssh_test"]
+
+
+def ssh_test(pem_file_path: str = None):
+
+
+    ec2 = boto3.resource('ec2')
+    instance = None
+
+    if os.path.exists("exp_data1.txt"):
+        with open("exp_data1.txt", 'rt') as f:
+            d2 = json.load(f)
+    else :
+        instances = ec2.instances.filter(Filters=[{'Name': 'instance-state-name', 'Values': ['running']}])
+
+        for i in instances:
+            instance = i
+        instance_json = {
+            'instance_id': instance.instance_id,
+        }
+        json.dump(instance_json, open("exp_data1.txt", 'w'))
+        d2 = json.load(open("exp_data1.txt"))
+        # print(d2)
+
+    # if d2["instance_id"] == "" :
+    #     print("instance is ----- empty")
+    #
+    # else :
+    instance = ec2.Instance(d2["instance_id"])
+
+    logger.info('Starting SSH into ec2 instance - ' + instance.instance_id)
+
+
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    privkey = paramiko.RSAKey.from_private_key_file(pem_file_path)
+
+    try :
+        ssh.connect(instance.public_dns_name, username='ec2-user', pkey=privkey, timeout=10)
+    except :
+        logger.info('SSH Times out - waited for 10 seconds')
+        return False
+
+    stdin, stdout, stderr = ssh.exec_command('echo "hello world"')
+    # stdin, stdout, stderr = ssh.exec_command('stress-ng --cpu 4 --timeout 60s --metrics-brief')
+    stdin.flush()
+    data = stdout.read().splitlines()
+    for line in data:
+        x = line.decode()
+
+        ssh.close()
+
+    logger.info('SSH Successfull')
+    return True
 
 
 def describe_instances(filters: List[Dict[str, Any]],
