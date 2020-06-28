@@ -1,0 +1,41 @@
+version: 1.0.0
+title: What happens if ALB failes, no listeners
+description: Simulate ALB failures
+configuration:
+  aws_region: us-east-2
+
+steady-state-hypothesis:
+  title: Access Load Balancer endpoint , http call to check if it is working
+  probes:
+    - type: probe
+      name: Access Load Balancer endpoint
+      tolerance: 200
+      provider:
+        type: http
+        url: http://testalb-1741665049.us-east-2.elb.amazonaws.com/hello
+        expected_status: 200
+
+
+method:
+- type: action
+  title: Simulate ALB failures by removing listeners
+  name: Simulate ALB failures by removing listeners
+  provider:
+    type: python
+    module: chaosaws.elbv2.actions
+    func: alb_listener_removed
+  pauses:
+    after: 30
+
+
+rollbacks:
+  - type: action
+    title: Rollback ALB Failures by recreating original listener configuration
+    name: Rollback ALB Failures by recreating original listener configuration
+    provider:
+      type: python
+      module: chaosaws.elbv2.actions
+      func: rollback_alb_listener_removed
+
+
+

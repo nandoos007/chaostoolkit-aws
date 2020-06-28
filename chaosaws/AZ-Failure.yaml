@@ -1,0 +1,40 @@
+version: 1.0.0
+title: What happens if there is an AZ Failure
+description: Simulate AZ failure by creating blackhole Network ACL
+configuration:
+  aws_region: us-east-2
+
+steady-state-hypothesis:
+  title: SSH access to EC2 machine is working
+  probes:
+    - type: probe
+      name: Check SSH Access to EC2 Instance
+      tolerance: true
+      provider:
+        type: python
+        module: chaosaws.ec2.probes
+        func: ssh_test
+        arguments:
+          pem_file_path: Test-Chaos.pem
+
+method:
+- type: action
+  title: Simulate AZ Failure by creating Blackhole ACL and attaching to Subnet
+  name: AZ Failure Action creates a blackhole ACL, attaches it to a subnet thereby simulating AZ failure
+  provider:
+    type: python
+    module: chaosaws.ec2.actions
+    func: az_failure
+
+
+rollbacks:
+- type: action
+  title: Rollback AZ failure and restore original ACL to Subnet
+  name: Rollback AZ failure by restoring Original ACL to Subnet and deleting blachole ACL
+  provider:
+    type: python
+    module: chaosaws.ec2.actions
+    func: rollback_az_failure
+
+
+

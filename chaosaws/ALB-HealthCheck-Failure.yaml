@@ -1,0 +1,41 @@
+version: 1.0.0
+title: What happens if there is Application Failure due to Health check Failures
+description: Application Failure due to Health check Failures
+configuration:
+  aws_region: us-east-2
+
+steady-state-hypothesis:
+  title: Access Load Balancer endpoint , http call to check if it is working
+  probes:
+    - type: probe
+      name: Access Load Balancer endpoint
+      tolerance: 200
+      provider:
+        type: http
+        url: http://testalb-1741665049.us-east-2.elb.amazonaws.com/hello
+        expected_status: 200
+
+
+method:
+- type: action
+  title: Simulate Health failure by changing security group of target group instance
+  name: Simulate Health failure by changing security group of target group instance
+  provider:
+    type: python
+    module: chaosaws.elbv2.actions
+    func: alb_instance_healthcheck_fail
+  pauses:
+    after: 60
+
+
+rollbacks:
+  - type: action
+    title: Rollback health failures by restoring original security groups
+    name:  Rollback health failures by restoring original security groups
+    provider:
+      type: python
+      module: chaosaws.elbv2.actions
+      func: rollback_alb_instance_healthcheck_fail
+
+
+
