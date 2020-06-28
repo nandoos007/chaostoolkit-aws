@@ -7,7 +7,12 @@ from logzero import logger
 
 from chaosaws import aws_client
 
-__all__ = ["get_alarm_state_value", "get_metric_statistics"]
+__all__ = ["get_alarm_state_value", "get_metric_statistics", "ssh_test"]
+
+
+def ssh_test():
+    print("hello")
+    return True
 
 
 def get_alarm_state_value(alarm_name: str,

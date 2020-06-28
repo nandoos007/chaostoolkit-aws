@@ -11,10 +11,138 @@ from chaosaws.types import AWSResponse
 from chaoslib.exceptions import FailedActivity, ActivityFailed
 from chaoslib.types import Configuration, Secrets
 from logzero import logger
+import boto3
+import json
+
 
 __all__ = ["stop_instance", "stop_instances", "terminate_instances",
            "terminate_instance", "start_instances", "restart_instances",
            "detach_random_volume", "attach_volume"]
+
+def get_client(service):
+    """Get an AWS client for a service."""
+    session = boto3.Session()
+    return session.client(service)
+
+def get_network_acls():
+    """List info about all network ACLs."""
+    client = get_client("ec2")
+    return client.describe_network_acls()
+
+def create_network_acl(vpc_id):
+    """Create a network ACL."""
+    client = get_client("ec2")
+    params = {}
+    params["VpcId"] = vpc_id
+    return client.create_network_acl(**params)
+
+
+def create_network_acl_ingress_entry(acl_id, rule_num, protocol, cidr_block,
+                                     from_port, to_port, allow=True):
+    """Create an ACL entry for inbound traffic.
+    Note that ``protocol`` should be an IP Protocol number, but passed in
+    as a string, like "6", not 6 or "tcp"."""
+    client = get_client("ec2")
+    params = {}
+    params["NetworkAclId"] = acl_id
+    params["RuleNumber"] = rule_num
+    params["Protocol"] = protocol
+    params["CidrBlock"] = cidr_block
+    params["Egress"] = False
+    params["RuleAction"] = "ALLOW" if allow else "DENY"
+    params["PortRange"] = {"From": from_port, "To": to_port}
+    return client.create_network_acl_entry(**params)
+
+def delete_network_acl(acl_id):
+    """Delete a network ACL."""
+    client = get_client("ec2")
+    params = {}
+    params["NetworkAclId"] = acl_id
+    return client.delete_network_acl(**params)
+
+
+def change_network_acl_association(acl_id, assoc_id):
+    """Change an ACL's association."""
+    client = get_client("ec2")
+    params = {}
+    params["AssociationId"] = assoc_id
+    params["NetworkAclId"] = acl_id
+    return client.replace_network_acl_association(**params)
+
+
+def az_failure():
+
+    d2 = json.load(open("exp_data1.txt"))
+    ec2 = boto3.resource('ec2')
+    instance = ec2.Instance(d2["instance_id"])
+
+    vpc_id = instance.vpc_id
+    subnet_id = instance.subnet_id
+    d2["subnet_id"]= subnet_id
+    subnet = ec2.Subnet(subnet_id)
+    logger.info('Simulating AZ failure for - ' + subnet.availability_zone)
+
+    acl_response = create_network_acl(vpc_id)
+    logger.info('Created new network ACL - ' + str(acl_response))
+
+    acl_id = acl_response['NetworkAcl']['NetworkAclId']
+
+    logger.info('Creating blackhole ACL')
+    create_network_acl_ingress_entry(acl_id, rule_num=1, protocol="-1", cidr_block="0.0.0.0/0", from_port=-30000, to_port=30000, allow=True)
+
+
+    NetworkAclAssociationId = None
+    prev_NetworkAclId = None
+
+    nw_acl_dict = get_network_acls()
+
+    for x in nw_acl_dict['NetworkAcls'] :
+        for y in x['Associations'] :
+            if y['SubnetId'] == subnet_id :
+                NetworkAclAssociationId = y['NetworkAclAssociationId']
+                prev_NetworkAclId = y['NetworkAclId']
+                d2["acl_id"]= prev_NetworkAclId
+                d2["blackhole_acl_id"] = acl_id
+                json.dump(d2, open("exp_data1.txt", 'w'))
+
+    logger.info('Replacing Original ACl - ' + prev_NetworkAclId + ' with blackhole ACL ' + acl_id + ' to subnet' + subnet_id)
+    change_network_acl_association(acl_id, NetworkAclAssociationId)
+
+
+def rollback_az_failure():
+
+    d2 = json.load(open("exp_data1.txt"))
+    prev_NetworkAclId = d2["acl_id"]
+    blackhole_acl_id = d2["blackhole_acl_id"]
+    subnet_id = d2["subnet_id"]
+
+    logger.info('Rolling back ACL for subnet ' + subnet_id  + ' from blackhole acl - '+ blackhole_acl_id + ' to original ACl - ' + prev_NetworkAclId)
+    nw_acl_dict = get_network_acls()
+
+    for x in nw_acl_dict['NetworkAcls'] :
+        for y in x['Associations'] :
+            if y['SubnetId'] == subnet_id :
+                NetworkAclAssociationId = y['NetworkAclAssociationId']
+
+    change_network_acl_association(prev_NetworkAclId, NetworkAclAssociationId)
+    logger.info(' Removing Black hole ACl - ' + blackhole_acl_id)
+    delete_network_acl(blackhole_acl_id)
+
+def execute_commands_on_linux_instances(client, commands, instance_ids):
+    """Runs commands on remote linux instances
+    :param client: a boto/boto3 ssm client
+    :param commands: a list of strings, each one a command to execute on the instances
+    :param instance_ids: a list of instance_id strings, of the instances on which to execute the command
+    :return: the response from the send_command function (check the boto3 docs for ssm client.send_command() )
+    """
+
+    resp = client.send_command(
+        DocumentName="AWS-RunShellScript", # One of AWS' preconfigured documents
+        Parameters={'commands': commands},
+        InstanceIds=instance_ids,
+    )
+    return resp
+
 
 
 def stop_instance(instance_id: str = None, az: str = None, force: bool = False,
@@ -57,6 +185,15 @@ def stop_instance(instance_id: str = None, az: str = None, force: bool = False,
     logger.debug(
         "Picked EC2 instance '{}' from AZ '{}' to be stopped".format(
             instance_types, az))
+
+    logger.debug("--------------TRIED MODIFYING------------")
+
+    ssm_client = boto3.client('ssm') # Need your credentials here
+    commands = ['echo "hello world"']
+    instance_ids = ['i-0b5dad24487b3c8b3']
+    resp12 = execute_commands_on_linux_instances(ssm_client, commands, instance_ids )
+
+    logger.debug(resp12)
 
     return stop_instances_any_type(instance_types=instance_types,
                                    force=force, client=client)
@@ -118,6 +255,8 @@ def terminate_instance(instance_id: str = None, az: str = None,
     filters found:
     https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/ec2.html#EC2.Client.describe_instances
     """
+
+    logger.debug("---------TERMINATING-------------")
 
     if not any([instance_id, az, filters]):
         raise FailedActivity('To terminate an EC2, you must specify the '

@@ -3,6 +3,7 @@ import random
 from typing import Dict, List
 
 import boto3
+import json
 from botocore.exceptions import ClientError
 from logzero import logger
 
@@ -10,9 +11,240 @@ from chaoslib.exceptions import FailedActivity
 from chaoslib.types import Configuration, Secrets
 from chaosaws import aws_client
 from chaosaws.types import AWSResponse
+import time
+import random
 
 __all__ = ["deregister_target", "set_security_groups", "set_subnets",
-           "delete_load_balancer"]
+           "delete_load_balancer", "alb_instance_healthcheck_fail"]
+
+
+def get_client(service):
+    """Get an AWS client for a service."""
+    session = boto3.Session()
+    return session.client(service)
+
+def get_response(self, action, params, path='/', parent=None,
+                 verb='POST', list_marker='Set'):
+    """
+    Utility method to handle calls to IAM and parsing of responses.
+    """
+    if not parent:
+        parent = self
+    response = self.make_request(action, params, path, verb)
+    body = response.read()
+    boto.log.debug(body)
+    if response.status == 200:
+        e = boto.jsonresponse.Element(list_marker=list_marker,
+                                      pythonize_name=True)
+        h = boto.jsonresponse.XmlHandler(e, parent)
+        h.parse(body)
+        return e
+    else:
+        boto.log.error('%s %s' % (response.status, response.reason))
+        boto.log.error('%s' % body)
+        raise self.ResponseError(response.status, response.reason, body)
+
+
+def get_client(service):
+    """Get an AWS client for a service."""
+    session = boto3.Session()
+    return session.client(service)
+
+
+def get_load_balancers():
+    """List info about all load balancers."""
+    client = get_client("elbv2")
+    return client.describe_load_balancers()
+
+def create_dummy_certificate():
+    # private_file = open("server.key", "rb").read()
+    # public_file = open("server.crt", "rb").read()
+    # cert = {}
+    # cert['Key'] = "Name"
+    # cert['Value'] = "AUTOCERT"
+    #
+    # Tags_Array =[]
+    # Tags_Array.append(cert)
+    #
+    # client = boto3.client('acm')
+    # response = client.import_certificate(Certificate = public_file, PrivateKey = private_file, Tags = Tags_Array )
+    # print("NEW CERTIFICATE - " + response['CertificateArn'])
+
+    client = boto3.client('iam')
+    PrivateKey = open("server.key", "rb").read().decode()
+    CertificateBody  = open("server.crt", "rb").read().decode()
+
+    response = client.upload_server_certificate(
+        ServerCertificateName ='AutoIAMCert6',
+        CertificateBody = CertificateBody,
+        PrivateKey = PrivateKey,
+    )
+
+    return response['ServerCertificateMetadata']['Arn']
+
+
+def alb_certificate_removed() :
+
+    dummy_certificate_arn = create_dummy_certificate()
+
+    client = get_client("elbv2")
+    lb = get_load_balancers()
+    logger.info('Getting list of loadbalancers' + str(get_load_balancers()))
+
+    for x in lb['LoadBalancers'] :
+        logger.info('getting list of listners   ' + x['LoadBalancerArn'] )
+        # Get Listeners
+        logger.info('Describe Listeners ' + str(client.describe_listeners(LoadBalancerArn = x['LoadBalancerArn'])))
+        listeners = client.describe_listeners(LoadBalancerArn = x['LoadBalancerArn'])
+        j2 = {}
+        listner_dict = {}
+        listener_arr = []
+        for y in listeners['Listeners'] :
+            cert_arr = []
+            logger.info('Listener configuration ' + str(y))
+            try :
+                if 'Certificates' in y.keys() :
+                   j2['ListenerArn'] = y['ListenerArn']
+                   for z in y['Certificates'] :
+                        cert_dict = {}
+                        cert_dict['CertificateArn'] = z['CertificateArn']
+                        if 'IsDefault' in z.keys() :
+                            cert_dict['IsDefault'] = z['IsDefault']
+                        cert_arr.append(cert_dict)
+                        j2['Certificates'] = cert_arr
+                        listener_arr.append(j2)
+            except Exception as ex:
+                logger.info(ex)
+
+        logger.info("Saving current certificate data")
+        listner_dict['Listener'] = listener_arr
+        json.dump(listner_dict, open("alb_certs_data.txt", 'w'))
+
+        d2 = json.load(open("alb_certs_data.txt"))
+        client = get_client("elbv2")
+        cert = {}
+        cert['CertificateArn'] = dummy_certificate_arn
+
+        # cert['CertificateArn'] = "arn:aws:iam::317258752732:server-certificate/ExampleCertificate"
+        cert_Array =[]
+        cert_Array.append(cert)
+        logger.infor("Attaching dummy certificate "+ str(cert_Array))
+
+        for x in d2['Listener'] :
+            time.sleep(20)
+            client.modify_listener(ListenerArn = x['ListenerArn'], Certificates = cert_Array)
+
+        time.pause(30)
+        rollback_alb_certificate_removed()
+
+
+def rollback_alb_certificate_removed() :
+    Logger.info("------ ROLLING-BACK Certiifcate  -----")
+    time.sleep(20)
+    client = get_client("elbv2")
+    d2 = json.load(open("alb_certs_data.txt"))
+    for x in d2['Listener'] :
+        client.modify_listener(ListenerArn = x['ListenerArn'], Certificates = x['Certificates'])
+    time.sleep(20)
+    iam = boto3.resource('iam')
+    server_certificate = iam.ServerCertificate('AutoIAMCert6')
+    server_certificate.delete()
+
+
+def alb_listener_removed() :
+    client = get_client("elbv2")
+    loadBalancers = client.describe_load_balancers()
+    exp_data={}
+
+    lb_arn = None
+    for lb in loadBalancers['LoadBalancers'] :
+        lb_arn = lb['LoadBalancerArn']
+        listeners = client.describe_listeners(LoadBalancerArn = lb_arn)
+        exp_data = listeners
+        exp_data['lb_arn'] = lb_arn
+        json.dump(exp_data, open("alb_listeners_data.txt", 'w'))
+        for ln in listeners['Listeners'] :
+            logger.infor("Removing listner - " + ln['ListenerArn'])
+            client.delete_listener(ListenerArn = ln['ListenerArn'])
+
+
+def rollback_alb_listener_removed() :
+    client = get_client("elbv2")
+    d2 = json.load(open("alb_listeners_data.txt"))
+    lb_arn = d2['lb_arn']
+
+    for ln in d2['Listeners']:
+        logger.info("Creating Listner  - "+ ln['Protocol'])
+        client.create_listener(LoadBalancerArn = lb_arn, Protocol = ln['Protocol'] , Port = ln['Port'], DefaultActions = ln['DefaultActions'] )
+
+
+
+
+def alb_instance_healthcheck_fail():
+
+    client = get_client("elbv2")
+    loadBalancers = client.describe_load_balancers()
+    ec2 = boto3.resource('ec2')
+    exp_data = {}
+
+    lb_arn = None
+    running_instances = None
+
+    for lb in loadBalancers['LoadBalancers'] :
+        lb_arn = lb['LoadBalancerArn']
+        logger.info("LB ARN  - "+lb_arn )
+        tg_list = client.describe_target_groups( LoadBalancerArn = lb_arn)
+        logger.info ("Target List " +str(tg_list))
+        for tg in tg_list['TargetGroups'] :
+            tg_arn = tg['TargetGroupArn']
+            tg_health_desc = client.describe_target_health( TargetGroupArn = tg_arn)
+            for target in tg_health_desc['TargetHealthDescriptions'] :
+                instance_id = target['Target']['Id']
+                inst_list=[]
+                inst_list.append(instance_id)
+                exp_data['InstanceId'] = instance_id
+                running_instances =  ec2.instances.filter(Filters=[{'Name': 'instance-state-name' , 'Values': ['running']}, {'Name': 'instance-id', 'Values': inst_list }])
+                for instance in running_instances :
+                    dummy_sg_id = create_dummy_sg(instance)
+                    exp_data['ChaosSecurityGroupId'] = dummy_sg_id
+                break
+            break
+        break
+
+    all_sg_ids = []
+    for instance in running_instances :
+        exp_data['SecurityGroups'] = [sg['GroupId'] for sg in instance.security_groups]  # Get a list of ids of all securify groups attached to the instance
+        all_sg_ids = []
+        all_sg_ids.append(dummy_sg_id)
+        logger.info("attaching dummy security group ")
+        instance.modify_attribute(Groups=all_sg_ids)
+
+    json.dump(exp_data, open("alb_sg_data.txt", 'w'))
+
+
+def rollback_alb_instance_healthcheck_fail():
+    ec2 = boto3.resource('ec2')
+    d2 = json.load(open("alb_sg_data.txt"))
+    inst_list=[]
+    inst_list.append(d2['InstanceId'])
+    running_instances =  ec2.instances.filter(Filters=[{'Name': 'instance-state-name' , 'Values': ['running']}, {'Name': 'instance-id', 'Values': inst_list }])
+    for instance in running_instances :
+        instance.modify_attribute(Groups=d2['SecurityGroups'])
+    get_client("ec2").delete_security_group(GroupId=d2['ChaosSecurityGroupId'])
+
+
+
+
+def create_dummy_sg(inst) :
+    ec2 = boto3.client('ec2')
+    response = ec2.create_security_group(GroupName='CHAOS_SECURITY_GROUP_7',
+                                         Description='CHAOS SG GROUP',
+                                         VpcId= inst.vpc_id)
+
+    logger.info("Dummy Security Group  - " + response['GroupId'] )
+    return response['GroupId']
+
+
 
 
 def deregister_target(tg_name: str,
