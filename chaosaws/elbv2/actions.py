@@ -15,7 +15,8 @@ import time
 import random
 
 __all__ = ["deregister_target", "set_security_groups", "set_subnets",
-           "delete_load_balancer", "alb_instance_healthcheck_fail"]
+           "delete_load_balancer", "alb_instance_healthcheck_fail", 
+           "deregister_instances", "register_instances"]
 
 
 def get_client(service):
@@ -267,6 +268,50 @@ def deregister_target(tg_name: str,
                 'Id': random_target['Target']['Id'],
                 'Port': random_target['Target']['Port']
             }]
+        )
+    except ClientError as e:
+        raise FailedActivity('Exception detaching %s: %s' % (
+            tg_name, e.response['Error']['Message']))
+
+def deregister_instances(tg_name: str,
+                      configuration: Configuration = None,
+                      secrets: Secrets = None) -> AWSResponse:
+    d2 = json.load(open('exp_data1.txt'))
+    """Deregisters all instances in exp_data1.txt"""
+    client = aws_client('elbv2', configuration, secrets)
+    tg_arn = get_target_group_arns(tg_names=[tg_name], client=client)
+    tg_health = get_targets_health_description(tg_arns=tg_arn, client=client)
+    instances = list(map(lambda instance: instance['Id'],d2['target_group']['instances']))
+
+    logger.debug("Deregistering target {} from target group {}".format(
+        instances, tg_name))
+
+    try:
+        return client.deregister_targets(
+            TargetGroupArn=tg_arn[tg_name],
+            Targets=d2['target_group']['instances']
+        )
+    except ClientError as e:
+        raise FailedActivity('Exception detaching %s: %s' % (
+            tg_name, e.response['Error']['Message']))
+
+def register_instances(tg_name: str,
+                      configuration: Configuration = None,
+                      secrets: Secrets = None) -> AWSResponse:
+    d2 = json.load(open('exp_data1.txt'))
+    """Registers all instances in exp_data1.txt"""
+    client = aws_client('elbv2', configuration, secrets)
+    tg_arn = get_target_group_arns(tg_names=[tg_name], client=client)
+    tg_health = get_targets_health_description(tg_arns=tg_arn, client=client)
+    instances = list(map(lambda instance: instance['Id'],d2['target_group']['instances']))
+
+    logger.debug("Registering target {} from target group {}".format(
+        instances, tg_name))
+
+    try:
+        return client.register_targets(
+            TargetGroupArn=tg_arn[tg_name],
+            Targets=d2['target_group']['instances']
         )
     except ClientError as e:
         raise FailedActivity('Exception detaching %s: %s' % (
