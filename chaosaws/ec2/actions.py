@@ -17,7 +17,7 @@ import json
 
 __all__ = ["stop_instance", "stop_instances", "terminate_instances",
            "terminate_instance", "start_instances", "restart_instances",
-           "detach_random_volume", "attach_volume"]
+           "detach_random_volume", "attach_volume", "blackhole_security_group", "revert_blackhole_security_group"]
 
 def get_client(service):
     """Get an AWS client for a service."""
@@ -903,3 +903,51 @@ def create_ingress_kwargs(requested_security_group_id: str,
     if ingress_security_group_id is not None:
         req['UserIdGroupPairs'][0]['GroupId'] = ingress_security_group_id
     return request_kwargs
+
+def create_security_group(vpc_id: str, 
+                          client: boto3.client) -> Dict:
+    """Create new security group"""
+    return client.create_security_group(
+        Description="Security group created by Chaos Toolkit",
+        GroupName="Chaos Toolkit Security Group",
+        VpcId=vpc_id
+    )
+
+def delete_security_group(security_group_id: str,
+                          client: boto3.client) -> Dict:
+    """Delete security group"""
+    return client.delete_security_group(
+    GroupId=security_group_id,
+)
+
+def blackhole_security_group(instance_id: str, 
+                        configuration: Configuration = None,
+                        secrets: Secrets = None) -> AWSResponse:
+    """Creates and sets the blackhole security group for an instance (simulate a hard crash on an instance)"""
+    client = aws_client('ec2', configuration, secrets)
+    ec2 = boto3.resource('ec2')
+    instance = ec2.Instance(instance_id)
+    security_group = create_security_group(vpc_id=instance.vpc_id, client=client)
+    logger.debug("Created blackhole security group with id {}".format(security_group['GroupId']))
+    try:
+        return instance.modify_attribute(Groups=[security_group['GroupId']])
+    except ClientError as e:
+        raise FailedActivity('Exception switching to %s: %s' % (
+            security_group['GroupId'], e.response['Error']['Message']))
+
+def revert_blackhole_security_group(instance_id: str,
+                        security_groups: List[str],
+                        configuration: Configuration = None,
+                        secrets: Secrets = None) -> AWSResponse:
+    """reverts security group for an instance"""
+    client = aws_client('ec2', configuration, secrets)
+    ec2 = boto3.resource('ec2')
+    instance = ec2.Instance(instance_id)
+    
+    logger.debug("Switching to original security groups with id(s) {}".format(security_groups))
+    try:
+        instance.modify_attribute(Groups=security_groups)
+        return client.delete_security_group(GroupName="Chaos Toolkit Security Group")
+    except ClientError as e:
+        raise FailedActivity('Exception switching to %s: %s' % (
+            security_groups), e.response['Error']['Message'])
